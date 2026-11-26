@@ -1,0 +1,6 @@
+# 运行时生成的排行榜数据，不属于源码
+pysnake_scores.json
+
+# Python 缓存文件
+__pycache__/
+*.pyc

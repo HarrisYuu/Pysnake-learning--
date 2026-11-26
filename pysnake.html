@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Pysnake - 经典贪吃蛇大作战</title>
+<!--
+  Pysnake 网页版
+  ============
+  单文件实现：HTML 负责页面结构，CSS 负责样式，JS 负责全部游戏逻辑。
+  与 Python 版（game.py）功能一一对应：
+    开始界面(START/SCORE/EXIT) / 排行榜(浏览器 localStorage 存储)
+    NPC蛇(长度5-8, 80%概率躲避玩家) / 金苹果(免疫一次死亡) / 小火箭(Q键加速3秒)
+  学习要点：
+    * 三个"界面"是三个 <div>，用 CSS class 控制谁可见（display 切换）
+    * <canvas> 2D 绘图：fillRect/arc/polygon，与 Python 的 tkinter Canvas 思路相同
+    * 游戏循环：setTimeout 自我续期（相当于 Python 的 root.after）
+    * 网格坐标 vs 像素坐标：逻辑用格子 (0~29, 0~19)，绘制时乘 CELL_SIZE
+-->
+<style>
+  /* ---------- 全局样式 ---------- */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1f12;               /* 深绿黑背景，和 Python 版一致 */
+    color: #e8f5e9;
+    font-family: "Microsoft YaHei", sans-serif;
+    display: flex; justify-content: center;   /* 页面内容水平居中 */
+    min-height: 100vh;
+    padding-top: 20px;
+  }
+  #app { width: 600px; }
+
+  /* ---------- 界面切换：只有带 .active 的 div 才显示 ---------- */
+  .screen { display: none; text-align: center; }
+  .screen.active { display: block; }
+
+  /* ---------- 标题 ---------- */
+  h1 {
+    color: #7CFC00; font-size: 56px; font-family: Arial, sans-serif;
+    margin: 20px 0 4px; letter-spacing: 2px;
+  }
+  .subtitle { color: #a5d6a7; font-size: 15px; margin-bottom: 10px; }
+
+  /* ---------- 按钮 ---------- */
+  button {
+    display: block; width: 220px; margin: 10px auto; padding: 10px 0;
+    background: #2e7d32; color: white; border: none; border-radius: 6px;
+    font-size: 16px; font-weight: bold; font-family: inherit;
+    cursor: pointer; transition: background 0.15s;
+  }
+  button:hover { background: #43a047; }
+  button.blue   { background: #1565c0; } button.blue:hover   { background: #1976d2; }
+  button.red    { background: #b71c1c; } button.red:hover    { background: #c62828; }
+  button.orange { background: #e65100; } button.orange:hover { background: #f57c00; }
+  button.inline { display: inline-block; width: auto; padding: 8px 22px; margin: 0 6px; }
+
+  /* ---------- 游戏区 ---------- */
+  canvas { display: block; }
+  #game-canvas { border: 2px solid #1b5e20; border-radius: 4px; background: black; }
+  #statusbar {
+    background: black; color: white; font-size: 13px;
+    padding: 6px 10px; text-align: left; border-radius: 0 0 4px 4px;
+    border: 2px solid #1b5e20; border-top: none;
+  }
+  /* 画布外层相对定位，游戏结束的输入框才能绝对定位盖在上面 */
+  #canvas-wrap { position: relative; }
+
+  /* 游戏结束遮罩：半透明黑底 + 居中内容 */
+  #gameover-overlay {
+    position: absolute; inset: 0;               /* 铺满整个画布区域 */
+    background: rgba(0, 0, 0, 0.55);
+    display: none; flex-direction: column; justify-content: center; align-items: center;
+  }
+  #gameover-overlay.show { display: flex; }
+  #gameover-overlay h2 { color: white; font-size: 30px; margin-bottom: 8px; }
+  #gameover-overlay p  { color: white; margin-bottom: 12px; }
+  #gameover-overlay input {
+    padding: 8px; font-size: 14px; text-align: center;
+    border: none; border-radius: 4px; margin-bottom: 10px; width: 200px;
+  }
+  #save-hint { color: #a5d6a7; font-size: 12px; margin-top: 10px; }
+
+  /* ---------- 排行榜 ---------- */
+  #score-list {
+    margin: 10px auto; width: 520px; height: 320px; overflow-y: auto;
+    background: #10241a; border-radius: 6px; text-align: left;
+    font-family: Consolas, monospace; font-size: 14px;
+  }
+  .score-row { padding: 8px 16px; cursor: pointer; white-space: pre; }
+  .score-row:hover { background: #1b3a26; }
+  .score-row.selected { background: #2e7d32; }
+  .score-empty { padding: 20px; text-align: center; color: #a5d6a7; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ========== 界面一：开始界面 ========== -->
+  <div id="title-screen" class="screen active">
+    <h1>Pysnake</h1>
+    <p class="subtitle">经 典 贪 吃 蛇 大 作 战</p>
+    <canvas id="title-canvas" width="600" height="220"></canvas>
+    <button id="btn-start">START</button>
+    <button id="btn-scores" class="blue">SCORE</button>
+    <button id="btn-exit" class="red">EXIT</button>
+  </div>
+
+  <!-- ========== 界面二：游戏界面 ========== -->
+  <div id="game-screen" class="screen">
+    <div id="canvas-wrap">
+      <canvas id="game-canvas" width="600" height="400"></canvas>
+      <!-- 游戏结束时显示的输入框（比 Python 版用 create_window 简单直接） -->
+      <div id="gameover-overlay">
+        <h2>游戏结束</h2>
+        <p id="final-score"></p>
+        <input id="name-input" type="text" placeholder="输入用户名（默认：匿名玩家）" maxlength="12">
+        <button id="btn-save" class="inline">保存成绩</button>
+        <p id="save-hint">输入用户名后点击保存（或按回车），按 R 直接重开</p>
+      </div>
+    </div>
+    <div id="statusbar"></div>
+  </div>
+
+  <!-- ========== 界面三：排行榜界面 ========== -->
+  <div id="score-screen" class="screen">
+    <h1 style="font-size:34px">排行榜</h1>
+    <div id="score-list"></div>
+    <div style="margin-top:14px">
+      <button id="btn-del" class="inline orange">删除选中</button>
+      <button id="btn-clear" class="inline red">清空全部</button>
+      <button id="btn-back" class="inline blue">返回</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+// ==================== 1. 常量区（和 Python 版对应） ====================
+const CELL = 20;          // 每格边长（像素）
+const GRID_W = 30;        // 横向格数
+const GRID_H = 20;        // 纵向格数
+const SPEED = 120;        // 正常步间隔（毫秒）
+const NPC_RESPAWN_MS = 3000;   // NPC 死亡后重生延迟
+const BOOST_DURATION = 3000;   // 火箭加速时长（毫秒）
+const BOOST_FACTOR = 2;        // 加速倍数
+const STORAGE_KEY = "pysnake_scores";  // 排行榜在 localStorage 里的键名
+
+// ==================== 2. 小工具 ====================
+const $ = id => document.getElementById(id);   // 缩写：按 id 取元素
+
+// ---------- 界面切换：给对应 div 加/减 .active 类 ----------
+let current = "title";   // 记录当前界面名（ESC 判断用）
+function showScreen(name) {
+  current = name;
+  document.querySelectorAll(".screen").forEach(d => d.classList.remove("active"));
+  $(name + "-screen").classList.add("active");
+  if (name === "scores") refreshScoreList();
+}
+
+// ==================== 3. 排行榜（localStorage 存取） ====================
+// localStorage 是浏览器内置的"小型本地数据库"，只能存字符串，
+// 所以用 JSON.stringify 存、JSON.parse 取（等价于 Python 版的 json 文件）
+function loadScores() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
+}
+function persistScores(scores) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(scores));
+}
+
+let selectedIndex = -1;   // 排行榜当前选中行号（-1 = 没选）
+
+function refreshScoreList() {
+  const scores = loadScores();
+  const box = $("score-list");
+  box.innerHTML = "";
+  selectedIndex = -1;
+  if (scores.length === 0) {
+    box.innerHTML = '<div class="score-empty">暂无记录，快去 START 打一局吧！</div>';
+    return;
+  }
+  scores.forEach((rec, i) => {
+    const row = document.createElement("div");
+    row.className = "score-row";
+    // padEnd/padStart 对齐文本，和 Python 的 :<12 :>8  formatting 同理
+    row.textContent = `  ${String(i + 1).padStart(3)}. ` +
+                      rec.name.padEnd(12, " ") +
+                      `${String(rec.score).padStart(8)} 分   ${rec.date}`;
+    row.onclick = () => {                       // 点击行 = 选中
+      box.querySelectorAll(".score-row").forEach(r => r.classList.remove("selected"));
+      row.classList.add("selected");
+      selectedIndex = i;
+    };
+    box.appendChild(row);
+  });
+}
+
+$("btn-del").onclick = () => {
+  const scores = loadScores();
+  if (selectedIndex < 0 || selectedIndex >= scores.length) { alert("请先点击选中一条记录"); return; }
+  scores.splice(selectedIndex, 1);   // 删除下标处的元素
+  persistScores(scores);
+  refreshScoreList();
+};
+$("btn-clear").onclick = () => {
+  if (loadScores().length === 0) return;
+  if (confirm("确定要清空所有排行榜数据吗？")) {   // confirm = 浏览器原生确认框
+    persistScores([]);
+    refreshScoreList();
+  }
+};
+$("btn-back").onclick = () => showScreen("title");
+
+// ==================== 4. 开始界面（装饰蛇画图） ====================
+(function drawTitleDecor() {
+  const c = $("title-canvas").getContext("2d");
+  const points = [];
+  for (let i = 0; i < 10; i++)
+    points.push([90 + i * 48, 130 - Math.sin(i * 0.85) * 40]);
+  const shades = ["#1b5e20", "#2e7d32", "#388e3c", "#43a047"];
+  // 尾巴到脖子：一串圆
+  for (let i = points.length - 2; i >= 0; i--) {
+    c.fillStyle = shades[i % 4];
+    c.beginPath(); c.arc(points[i][0], points[i][1], 14, 0, Math.PI * 2); c.fill();
+  }
+  // 头 + 眼睛
+  const [hx, hy] = points[points.length - 1];
+  c.fillStyle = "#66bb6a";
+  c.beginPath(); c.arc(hx, hy, 16, 0, Math.PI * 2); c.fill();
+  c.fillStyle = "#fff";
+  c.beginPath(); c.arc(hx - 4, hy - 2, 5, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(hx + 8, hy - 2, 5, 0, Math.PI * 2); c.fill();
+  c.fillStyle = "#000";
+  c.beginPath(); c.arc(hx - 2, hy - 2, 2, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(hx + 10, hy - 2, 2, 0, Math.PI * 2); c.fill();
+  // 前方的苹果
+  c.fillStyle = "#e0342f";
+  c.beginPath(); c.arc(hx + 32, hy + 14, 10, 0, Math.PI * 2); c.fill();
+})();
+
+$("btn-start").onclick = () => { startGame(); showScreen("game"); };
+$("btn-exit").onclick = () => tryExit();
+function tryExit() {
+  window.close();                        // 尝试关闭标签页（浏览器可能拒绝）
+  alert("如果页面没有自动关闭，请手动关闭浏览器标签页。");
+}
+
+// ==================== 5. 游戏核心 ====================
+const canvas = $("game-canvas"), ctx = canvas.getContext("2d");
+
+// 棋盘格背景只画一次，存进"离屏画布"（内存里的隐形画布），
+// 每帧用 drawImage 整体贴上去——比每帧重画 600 个格子快得多
+const bgCanvas = document.createElement("canvas");
+bgCanvas.width = canvas.width; bgCanvas.height = canvas.height;
+(function makeBackground() {
+  const b = bgCanvas.getContext("2d");
+  for (let y = 0; y < GRID_H; y++)
+    for (let x = 0; x < GRID_W; x++) {
+      b.fillStyle = (x + y) % 2 === 0 ? "#16281a" : "#1b331f";
+      b.fillRect(x * CELL, y * CELL, CELL, CELL);
+    }
+})();
+
+// ---------- 游戏状态（与 Python 版 GameScreen 的成员变量一一对应） ----------
+let snake, npc, npcDir, direction, pendingDirection;
+let food, golden, rocket;
+let shield, hasRocket, boostUntil;
+let score, paused, gameOver, saved;
+let epoch = 0;   // "时代编号"：每次重开 +1，让过期的定时任务自动作废
+
+function startGame() {
+  epoch++;
+  hideGameOverUI();
+  const cx = GRID_W >> 1, cy = GRID_H >> 1;
+  snake = [[cx, cy], [cx - 1, cy], [cx - 2, cy]];
+  direction = pendingDirection = [1, 0];
+  npc = []; npcDir = [1, 0];
+  golden = null; rocket = null;
+  shield = false; hasRocket = false; boostUntil = 0;
+  score = 0; paused = false; gameOver = false; saved = false;
+  food = randomFreeCell();
+  if (!spawnNpc()) scheduleNpcRespawn(epoch);
+  scheduleGolden(epoch);
+  scheduleRocket(epoch);
+  updateStatus();
+}
+
+// ---------- 随机空格 / 生成物 ----------
+function randomFreeCell() {
+  // 收集所有空格，再随机挑一个（场上东西多时避免 while 死循环）
+  const occupied = new Set([food, golden, rocket,
+    ...snake, ...npc].filter(Boolean).map(p => p[0] + "," + p[1]));
+  const free = [];
+  for (let x = 0; x < GRID_W; x++)
+    for (let y = 0; y < GRID_H; y++)
+      if (!occupied.has(x + "," + y)) free.push([x, y]);
+  return free.length ? free[Math.floor(Math.random() * free.length)] : null;
+}
+
+function spawnNpc() {
+  // 随机头位置 + 朝向，沿反方向排出 5~8 格身体，合法才算成功
+  for (let tries = 0; tries < 500; tries++) {
+    const len = 5 + Math.floor(Math.random() * 4);   // 5~8
+    const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    const d = dirs[Math.floor(Math.random() * 4)];
+    const hx = Math.floor(Math.random() * GRID_W);
+    const hy = Math.floor(Math.random() * GRID_H);
+    const body = [];
+    for (let i = 0; i < len; i++) body.push([hx - i * d[0], hy - i * d[1]]);
+    const ok = body.every(([x, y]) =>
+      x >= 0 && x < GRID_W && y >= 0 && y < GRID_H && !snake.some(s => s[0] === x && s[1] === y));
+    if (ok) { npc = body; npcDir = d; return true; }
+  }
+  return false;
+}
+
+// ---------- 定时任务：setTimeout 相当于 Python 的 root.after ----------
+// 每个任务都捕获当时的 epoch，执行时发现时代变了就直接放弃
+function scheduleNpcRespawn(ep) {
+  setTimeout(() => {
+    if (ep !== epoch || gameOver) return;
+    if (!spawnNpc()) scheduleNpcRespawn(ep);
+  }, NPC_RESPAWN_MS);
+}
+function scheduleGolden(ep) {
+  setTimeout(() => {
+    if (ep !== epoch || gameOver) return;
+    if (!golden) golden = randomFreeCell();
+    scheduleGolden(ep);          // 5~10 秒后再次尝试
+  }, 5000 + Math.random() * 5000);
+}
+function scheduleRocket(ep) {
+  setTimeout(() => {
+    if (ep !== epoch || gameOver) return;
+    if (!rocket) rocket = randomFreeCell();
+    scheduleRocket(ep);          // 8~15 秒后再次尝试
+  }, 8000 + Math.random() * 7000);
+}
+
+// ---------- 键盘 ----------
+document.addEventListener("keydown", e => {
+  // 焦点在输入框里时按键只归输入框（否则打字敲到 r 会误触发重开）
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "Escape") {          // ESC：标题界面尝试退出，其余返回标题
+    if (current === "title") tryExit();
+    else showScreen("title");
+    return;
+  }
+  if (current !== "game") return;
+  handleGameKey(e);
+});
+
+function handleGameKey(e) {
+  const dirs = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+  if (dirs[e.key]) {
+    e.preventDefault();   // 阻止方向键/空格滚动页面
+    const d = dirs[e.key];
+    // 禁止 180° 掉头
+    if (d[0] + direction[0] !== 0 || d[1] + direction[1] !== 0)
+      pendingDirection = d;
+  } else if (e.key === " " && !gameOver) {
+    e.preventDefault();
+    paused = !paused;
+    updateStatus();
+  } else if (e.key.toLowerCase() === "q") {
+    if (hasRocket && Date.now() >= boostUntil) {
+      hasRocket = false;
+      boostUntil = Date.now() + BOOST_DURATION;
+      updateStatus();
+    }
+  } else if (e.key.toLowerCase() === "r" && gameOver) {
+    startGame();
+  }
+}
+
+// ---------- 游戏循环：setTimeout 自我续期 ----------
+function gameLoop() {
+  if (current === "game" && !paused && !gameOver) step();
+  draw();
+  const interval = Date.now() < boostUntil ? SPEED / BOOST_FACTOR : SPEED;
+  setTimeout(gameLoop, interval);
+}
+
+// ---------- 前进一帧 ----------
+function step() {
+  direction = pendingDirection;
+  const [hx, hy] = snake[0];
+  let nx = hx + direction[0], ny = hy + direction[1];
+
+  // 情况1：撞墙 —— 有金苹果免疫则消耗并随机转向
+  if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) {
+    if (shield) { useShieldTurn(); nx = hx + direction[0]; ny = hy + direction[1]; }
+    else return endGame();
+  }
+  // 情况2：撞到 NPC —— 免疫同样有效
+  if (npc.some(c => c[0] === nx && c[1] === ny)) {
+    if (shield) { useShieldTurn(); nx = hx + direction[0]; ny = hy + direction[1]; }
+    else return endGame();
+  }
+  // 情况3：撞到自己 —— 免疫无效
+  if (snake.some(c => c[0] === nx && c[1] === ny)) return endGame();
+
+  snake.unshift([nx, ny]);   // 头部插入新格 = 前进
+
+  if (nx === food[0] && ny === food[1]) {
+    score += 10;
+    food = randomFreeCell();
+  } else if (golden && nx === golden[0] && ny === golden[1]) {
+    golden = null;
+    if (!shield) shield = true;      // 不叠加
+    updateStatus();
+  } else if (rocket && nx === rocket[0] && ny === rocket[1]) {
+    rocket = null;
+    if (!hasRocket) hasRocket = true; // 库存不叠加
+    updateStatus();
+  } else {
+    snake.pop();             // 没吃到就弹尾巴 = 等长前进
+  }
+
+  stepNpc();
+}
+
+function useShieldTurn() {
+  shield = false;
+  direction = pendingDirection = randomTurn();
+  updateStatus();
+}
+
+function randomTurn() {
+  // 金苹果触发：绝不掉头，优先安全方向，其次只看墙，四面楚歌也随机选一个
+  const [hx, hy] = snake[0];
+  const all = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+  const candidates = all.filter(d => d[0] + direction[0] !== 0 || d[1] + direction[1] !== 0);
+  const inBounds = candidates.filter(d =>
+    hx + d[0] >= 0 && hx + d[0] < GRID_W && hy + d[1] >= 0 && hy + d[1] < GRID_H);
+  const safe = inBounds.filter(d =>
+    !snake.some(c => c[0] === hx + d[0] && c[1] === hy + d[1]) &&
+    !npc.some(c => c[0] === hx + d[0] && c[1] === hy + d[1]));
+  const pool = safe.length ? safe : (inBounds.length ? inBounds : candidates);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function stepNpc() {
+  if (!npc.length) return;
+  npcDir = chooseNpcDirection();
+  const [hx, hy] = npc[0];
+  const nx = hx + npcDir[0], ny = hy + npcDir[1];
+
+  // 撞墙或撞自己 → 死亡（不给奖励）
+  if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H ||
+      npc.some(c => c[0] === nx && c[1] === ny)) {
+    npc = [];
+    scheduleNpcRespawn(epoch);
+    return;
+  }
+  npc.unshift([nx, ny]);
+
+  // 头碰到玩家身体 → 被击杀，+1000
+  if (snake.some(c => c[0] === nx && c[1] === ny)) {
+    npc = [];
+    score += 1000;
+    updateStatus();
+    scheduleNpcRespawn(epoch);
+    return;
+  }
+  if (nx === food[0] && ny === food[1]) food = randomFreeCell();  // 吃苹果变长
+  else npc.pop();
+}
+
+function chooseNpcDirection() {
+  // 1 永不掉头；2 边界和身体必躲；3 玩家身体 80% 躲、20% 无视；
+  // 4 安全方向里选离苹果最近的；5 走投无路随机走
+  const [hx, hy] = npc[0];
+  const all = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+  const candidates = all.filter(d => d[0] + npcDir[0] !== 0 || d[1] + npcDir[1] !== 0);
+
+  const danger = new Set(npc.slice(0, -1).map(p => p[0] + "," + p[1]));
+  if (Math.random() < 0.8)                 // 20% 概率无视玩家身体
+    snake.forEach(p => danger.add(p[0] + "," + p[1]));
+
+  const safe = candidates.filter(d => {
+    const nx = hx + d[0], ny = hy + d[1];
+    return nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H && !danger.has(nx + "," + ny);
+  });
+  if (!safe.length) return candidates[Math.floor(Math.random() * candidates.length)];
+
+  // 曼哈顿距离找离食物最近的（并列随机挑）
+  const dist = d => Math.abs(hx + d[0] - food[0]) + Math.abs(hy + d[1] - food[1]);
+  const best = Math.min(...safe.map(dist));
+  const bestDirs = safe.filter(d => dist(d) === best);
+  return bestDirs[Math.floor(Math.random() * bestDirs.length)];
+}
+
+// ---------- 游戏结束 / 保存成绩 ----------
+// 备份遮罩的原始内容：保存成绩后 JS 会改写遮罩（换成"已保存"提示），
+// 下一局再结束时要先恢复原始内容，否则输入框和按钮已经被覆盖掉了
+const OVERLAY_HTML = $("gameover-overlay").innerHTML;
+
+function endGame() {
+  gameOver = true;
+  const overlay = $("gameover-overlay");
+  if (!$("name-input")) {          // 上一局保存过 → 恢复输入框和按钮
+    overlay.innerHTML = OVERLAY_HTML;
+    bindOverlayEvents();
+  }
+  $("final-score").textContent = `得分: ${score}`;
+  $("name-input").value = "";
+  overlay.classList.add("show");
+}
+function hideGameOverUI() {
+  $("gameover-overlay").classList.remove("show");
+}
+function bindOverlayEvents() {
+  $("btn-save").onclick = saveScore;
+  $("name-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") saveScore();   // 输入框自己的回车保存
+    e.stopPropagation();                  // 阻止事件冒泡到文档级按键处理
+  });
+}
+bindOverlayEvents();
+function saveScore() {
+  if (saved) return;
+  const name = $("name-input").value.trim() || "匿名玩家";
+  const scores = loadScores();
+  const now = new Date();
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}` +
+               `-${String(now.getDate()).padStart(2, "0")} ` +
+               `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  scores.push({ name, score, date });
+  scores.sort((a, b) => b.score - a.score);   // 分数降序
+  persistScores(scores);
+  saved = true;
+  $("gameover-overlay").innerHTML =
+    `<h2>游戏结束</h2><p style="color:#7CFC00">已保存成绩：${name}　${score} 分</p>
+     <p style="color:#a5d6a7;font-size:12px">按 R 键重新开始</p>`;
+}
+
+// ---------- 状态栏 ----------
+function updateStatus() {
+  let s = `得分: ${score}　|　方向键移动　空格暂停　Q火箭　击杀NPC +1000分`;
+  if (shield)          s += "　|　金苹果免疫：就绪";
+  if (Date.now() < boostUntil) s += "　|　火箭加速中！";
+  else if (hasRocket)  s += "　|　火箭：已拾取（按Q使用）";
+  if (paused)          s += "　|　（已暂停）";
+  $("statusbar").textContent = s;
+}
+setInterval(updateStatus, 500);   // 加速/暂停状态每半秒刷新一次
+
+// ==================== 6. 绘制 ====================
+function draw() {
+  ctx.drawImage(bgCanvas, 0, 0);
+  if (golden) drawApple(golden, true);
+  if (food)   drawApple(food, false);
+  if (rocket) drawRocket(rocket);
+  drawSnake(npc, "#ffd54f", "orange", npcDir);
+  drawSnake(snake, "#66bb6a", "#43a047", direction);
+
+  if (current === "game" && paused) centerText("已暂停", "按空格键继续");
+  else if (current === "game" && gameOver)
+    centerText("游戏结束", saved ? `得分: ${score}　按 R 键重新开始` : "");
+}
+
+function drawSnake(body, headColor, bodyColor, dir) {
+  if (!body || !body.length) return;
+  body.forEach(([x, y], i) => {
+    ctx.fillStyle = i === 0 ? headColor : bodyColor;
+    ctx.beginPath();
+    ctx.arc(x * CELL + CELL / 2, y * CELL + CELL / 2, CELL / 2 - 1, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  // 眼睛：向行进方向偏移，再沿垂直方向分左右
+  const [hx, hy] = body[0];
+  const cx = hx * CELL + CELL / 2, cy = hy * CELL + CELL / 2;
+  const ex = cx + dir[0] * 3.5, ey = cy + dir[1] * 3.5;
+  const px = -dir[1], py = dir[0];
+  for (const s of [-1, 1]) {
+    const ox = ex + px * 4 * s, oy = ey + py * 4 * s;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(ox, oy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(ox, oy, 1.4, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawApple([x, y], golden) {
+  const cx = x * CELL + CELL / 2, cy = y * CELL + CELL / 2;
+  if (golden) {   // 金苹果外圈光晕
+    ctx.strokeStyle = "#fff59d"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, CELL / 2, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.fillStyle = golden ? "#ffd700" : "#e0342f";
+  ctx.beginPath(); ctx.arc(cx, cy + 1, CELL / 2 - 3, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#7a4a21"; ctx.lineWidth = 2;   // 果柄
+  ctx.beginPath(); ctx.moveTo(cx, cy - 6); ctx.lineTo(cx + 1, cy - 10); ctx.stroke();
+  ctx.fillStyle = "#3fa34d";                        // 叶子
+  ctx.beginPath(); ctx.ellipse(cx + 5, cy - 8, 4, 2, 0.4, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawRocket([x, y]) {
+  const x0 = x * CELL, y0 = y * CELL, cx = x0 + CELL / 2;
+  ctx.fillStyle = "#e0e0e0";                        // 机身
+  poly([[cx, y0 + 8], [x0 + 5, y0 + 13], [x0 + 15, y0 + 13]]);
+  ctx.fillStyle = "#e53935";                        // 机头
+  poly([[cx, y0 + 1], [x0 + 6, y0 + 8], [x0 + 14, y0 + 8]]);
+  poly([[x0 + 3, y0 + 11], [x0 + 7, y0 + 17], [x0 + 7, y0 + 11]]);      // 左尾翼
+  poly([[x0 + 17, y0 + 11], [x0 + 13, y0 + 17], [x0 + 13, y0 + 11]]);   // 右尾翼
+  ctx.fillStyle = "#ffb300";                        // 火焰
+  poly([[cx, y0 + 19], [x0 + 7, y0 + 14], [x0 + 13, y0 + 14]]);
+}
+function poly(points) {   // 画多边形的辅助函数
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  points.slice(1).forEach(p => ctx.lineTo(p[0], p[1]));
+  ctx.closePath(); ctx.fill();
+}
+
+function centerText(line1, line2) {
+  ctx.fillStyle = "rgba(0,0,0,0.45)";               // 半透明遮罩
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.font = "bold 28px Microsoft YaHei";
+  ctx.fillText(line1, canvas.width / 2, canvas.height / 2 - 10);
+  if (line2) {
+    ctx.font = "13px Microsoft YaHei";
+    ctx.fillText(line2, canvas.width / 2, canvas.height / 2 + 18);
+  }
+}
+
+// ==================== 启动 ====================
+startGame();        // 先初始化一局（界面还藏在后面）
+gameLoop();         // 启动游戏循环
+</script>
+</body>
+</html>
